@@ -71,3 +71,4 @@ the checkpoints, preview, and FID/KID report.
 This repository intentionally does not include resume/optimizer-state machinery
 or the SupCon/CTC-guided trainer from HiGAN-Contrastive.
 "# HiFre" 
+"# HiFre" 
