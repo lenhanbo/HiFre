@@ -1,9 +1,7 @@
-from networks.model import AdversarialModel
-
-all_models = {
-    'adversarial_model': AdversarialModel
-}
-
-
 def get_model(name):
-    return all_models[name]
+    # Keep package imports lightweight: frequency.py imports networks.module,
+    # while the trainer imports frequency.py.
+    if name != 'adversarial_model':
+        raise KeyError(name)
+    from networks.model import AdversarialModel
+    return AdversarialModel

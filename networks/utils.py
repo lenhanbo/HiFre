@@ -230,9 +230,12 @@ def ctc_greedy_decoder(probs_seq, blank_index=0):
 
 
 def make_one_hot(labels, len_labels, n_class):
-    one_hot = torch.zeros((labels.shape[0], labels.shape[1], n_class), dtype=torch.float32)
+    one_hot = torch.zeros((labels.shape[0], labels.shape[1], n_class),
+                          dtype=torch.float32, device=labels.device)
     for i in range(len(labels)):
-        one_hot[i, np.array(range(len_labels[i])), labels[i,:len_labels[i]]-1]=1
+        length = int(len_labels[i].item())
+        positions = torch.arange(length, device=labels.device)
+        one_hot[i, positions, labels[i, :length].long() - 1] = 1
     return one_hot
 
 

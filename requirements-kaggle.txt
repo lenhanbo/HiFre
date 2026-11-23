@@ -1,0 +1,8 @@
+munch
+h5py
+scipy
+pyyaml
+huggingface_hub
+tensorboard
+pytest
+opencv-python-headless

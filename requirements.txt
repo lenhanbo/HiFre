@@ -1,6 +1,9 @@
 torch>=1.0
+torchvision
 tensorboard
 munch
 opencv-python
 h5py
-sklearn
+scipy
+pyyaml
+huggingface_hub
