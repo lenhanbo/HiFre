@@ -2,6 +2,7 @@ from pathlib import Path
 
 from lib.alphabet import Alphabets
 from lib.utils import yaml2config
+from networks.model import training_time_limit_reached
 
 
 ROOT = Path(__file__).parents[1]
@@ -14,6 +15,13 @@ def test_spisgan_configuration_dimensions():
     assert cfg.WidModel.n_writer == 339
     assert cfg.EncModel.style_dim == 32
     assert cfg.GenModel.style_dim == 128
+    assert cfg.training.max_hours == 10.0
+
+
+def test_training_hour_limit_is_optional_and_uses_elapsed_wall_time():
+    assert not training_time_limit_reached(100.0, 0.0, now=100000.0)
+    assert not training_time_limit_reached(100.0, 2.0, now=7299.9)
+    assert training_time_limit_reached(100.0, 2.0, now=7300.0)
 
 
 def test_training_has_no_validation_best_or_test_dataset_path():

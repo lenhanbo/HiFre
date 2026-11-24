@@ -3,6 +3,7 @@ from __future__ import annotations
 from itertools import chain
 from pathlib import Path
 import random
+import time
 
 import torch
 import torch.nn.functional as F
@@ -27,6 +28,14 @@ except ModuleNotFoundError:
 
 def kl_loss(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
     return torch.mean(-0.5 * torch.sum(1 + logvar - mu.square() - logvar.exp(), dim=1))
+
+
+def training_time_limit_reached(started_at: float, max_hours: float,
+                                now: float | None = None) -> bool:
+    if max_hours <= 0:
+        return False
+    current = time.monotonic() if now is None else float(now)
+    return current - started_at >= max_hours * 3600.0
 
 
 class BaseModel:
@@ -105,10 +114,13 @@ class AdversarialModel(BaseModel):
         self.style_reconstruction = bool(opt.training.style_reconstruction)
         self.preview_every_steps = int(opt.training.preview_every_steps)
         self.preview_items = int(opt.training.preview_items)
+        self.max_hours = float(opt.training.max_hours)
         if self.preview_every_steps < 0:
             raise ValueError("training.preview_every_steps must be non-negative")
         if self.preview_items < 1:
             raise ValueError("training.preview_items must be positive")
+        if self.max_hours < 0:
+            raise ValueError("training.max_hours must be non-negative")
 
     def _random_labels(self, batch_size: int):
         indices = torch.randint(len(self.lexicon), (batch_size,), device=self.device)
@@ -227,6 +239,10 @@ class AdversarialModel(BaseModel):
             "kl_loss", "gp_ctc", "gp_info", "gp_wid",
         ])
         iteration = 0
+        started_at = time.monotonic()
+        stopped_by_time_limit = False
+        if self.max_hours > 0:
+            self.print(f"Training time limit: {self.max_hours:.2f} hours")
         for epoch in range(1, int(opt.training.epochs) + 1):
             for batch_index, batch in enumerate(loader):
                 images, image_lens, labels, label_lens, writers, _ = batch
@@ -331,24 +347,35 @@ class AdversarialModel(BaseModel):
                         self.writer.add_scalar(f"loss/{key}", value, iteration)
                     meters.reset_all()
                 global_step = iteration + 1
+                stopped_by_time_limit = training_time_limit_reached(
+                    started_at, self.max_hours)
                 should_preview = (self.preview_every_steps > 0
                                   and global_step % self.preview_every_steps == 0)
-                if max_batches and batch_index + 1 >= max_batches:
+                if stopped_by_time_limit or (max_batches and batch_index + 1 >= max_batches):
                     should_preview = True
                 if should_preview:
                     preview_path = self.save_training_preview(batch, epoch, global_step)
                     self.print(f"Saved preview: {preview_path}")
                 iteration += 1
+                if stopped_by_time_limit:
+                    elapsed_hours = (time.monotonic() - started_at) / 3600.0
+                    self.print(
+                        f"Training time limit reached after {elapsed_hours:.2f} hours "
+                        f"at epoch={epoch:03d}, batch={batch_index + 1:04d}, "
+                        f"global_step={global_step:08d}; saving last.pth")
+                    break
                 if max_batches and batch_index + 1 >= max_batches:
                     break
 
             self.save("last", epoch)
             cadence = int(opt.training.save_every_epochs)
-            if cadence > 0 and epoch % cadence == 0:
+            epoch_completed = batch_index + 1 >= len(loader)
+            if cadence > 0 and epoch % cadence == 0 and epoch_completed:
                 self.save(f"epoch_{epoch:03d}", epoch)
-            for scheduler in schedulers:
-                scheduler.step(epoch)
-            if max_batches:
+            if epoch_completed:
+                for scheduler in schedulers:
+                    scheduler.step(epoch)
+            if max_batches or stopped_by_time_limit:
                 break
         self.writer.close()
         return self.checkpoint_path("last")

@@ -52,6 +52,7 @@ frequency:
   cutoff: 0.06
   padding_mode: reflect
 training:
+  max_hours: 10.0
   style_reconstruction: true
   save_every_epochs: 5
   preview_every_steps: 2000
@@ -66,6 +67,13 @@ one shared random style, and `[noise, low, original, high]` reference style.
 Setting `preview_every_steps: 0` disables training previews. The smoke test always
 writes one preview, and final evaluation writes an annotated `preview.png` plus
 `preview.json` without opening the test split during training.
+
+`training.max_hours` is a soft wall-clock limit checked after every completed
+batch. At the limit, training writes a final annotated preview and `last.pth`,
+then the normal one-shot final evaluation runs from that checkpoint. The default
+is 10 hours so a 12-hour job retains time for checkpointing and full evaluation;
+set it to `0` to disable the limit. A partial epoch never receives an
+`epoch_NNN.pth` name.
 
 When style reconstruction is disabled, `info_loss`, `grad_fake_info`, `gp_info`,
 and the associated generator-loss term are skipped; `info_loss` and `gp_info`
