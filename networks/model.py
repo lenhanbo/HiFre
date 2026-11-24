@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from itertools import chain
 from pathlib import Path
+import random
 
 import torch
 import torch.nn.functional as F
@@ -11,7 +12,8 @@ from torch.utils.data import DataLoader
 
 from higan_frequency.data import SpiSGANHDF5Dataset, collate_words
 from higan_frequency.frequency import FrequencyStyleEncoder
-from lib.alphabet import Alphabets, get_lexicon, strLabelConverter
+from higan_frequency.preview import save_preview
+from lib.alphabet import Alphabets, get_lexicon, strLabelConverter, word_capitalize
 from lib.utils import AverageMeterManager, get_logger, option_to_string
 from networks.BigGAN_networks import Discriminator, Generator
 from networks.module import Recognizer, WriterIdentifier
@@ -101,6 +103,12 @@ class AdversarialModel(BaseModel):
         self.ctc_loss = CTCLoss(zero_infinity=True, reduction="mean")
         self.classify_loss = CrossEntropyLoss()
         self.style_reconstruction = bool(opt.training.style_reconstruction)
+        self.preview_every_steps = int(opt.training.preview_every_steps)
+        self.preview_items = int(opt.training.preview_items)
+        if self.preview_every_steps < 0:
+            raise ValueError("training.preview_every_steps must be non-negative")
+        if self.preview_items < 1:
+            raise ValueError("training.preview_items must be positive")
 
     def _random_labels(self, batch_size: int):
         indices = torch.randint(len(self.lexicon), (batch_size,), device=self.device)
@@ -117,14 +125,92 @@ class AdversarialModel(BaseModel):
     def _generate(self, latent, labels, label_lens):
         return self.models.G(latent, labels, label_lens)
 
+    @torch.inference_mode()
+    def save_training_preview(self, batch, epoch: int, global_step: int) -> Path:
+        modes = {name: model.training for name, model in self.models.items()}
+        for model in self.models.values():
+            model.eval()
+        try:
+            images, image_lens, _, _, writers, reference_texts = batch
+            count = min(self.preview_items, len(images))
+            images = images[:count].to(self.device)
+            image_lens = image_lens[:count].to(self.device)
+            writers = writers[:count].tolist()
+            reference_texts = list(reference_texts[:count])
+
+            preview_seed = int(self.opt.seed) + int(global_step)
+            word_rng = random.Random(preview_seed)
+            query_texts = []
+            for reference_text in reference_texts:
+                candidates = self.lexicon
+                query = word_rng.choice(candidates)
+                if len(candidates) > 1:
+                    while query.lower() == reference_text.lower():
+                        query = word_rng.choice(candidates)
+                if word_rng.random() < float(self.opt.training.capitalize_ratio):
+                    query = word_capitalize(query)
+                query_texts.append(query)
+            labels, label_lens = self.label_converter.encode(query_texts)
+            labels = labels.to(self.device).long()
+            label_lens = label_lens.to(self.device).long()
+            generated_lens = label_lens * int(self.opt.char_width)
+
+            generator = torch.Generator(device=self.device)
+            generator.manual_seed(preview_seed)
+            random_z_single = torch.randn(
+                (1, 128), generator=generator, device=self.device)
+            random_z = random_z_single.expand(count, -1)
+            frequency_style = self.models.E(
+                images, image_lens, self.models.W.cnn_backbone, vae_mode=False)
+            reference_noise = torch.randn(
+                (count, 32), generator=generator, device=self.device)
+            random_images = self._generate(random_z, labels, label_lens)
+            reference_images = self._generate(
+                torch.cat((reference_noise, frequency_style), dim=1), labels, label_lens)
+
+            metadata = {
+                "phase": "training",
+                "epoch": int(epoch),
+                "global_step": int(global_step),
+                "seed": preview_seed,
+                "latent_order": ["noise32", "low32", "original32", "high32"],
+                "frequency": {
+                    "cutoff": float(self.opt.frequency.cutoff),
+                    "padding_mode": str(self.opt.frequency.padding_mode),
+                },
+                "random_style": {
+                    "definition": "One shared 128-D N(0,I) latent for every row.",
+                    "z": random_z_single[0].float().cpu().tolist(),
+                },
+                "reference_style": {
+                    "definition": "Per-row [noise32, low32, original32, high32].",
+                    "noise": reference_noise.float().cpu().tolist(),
+                    "frequency_vectors": frequency_style.float().cpu().tolist(),
+                },
+            }
+            path = Path(self.log_root, "previews", f"step_{global_step:08d}.png")
+            return save_preview(
+                images, image_lens, random_images, reference_images, generated_lens,
+                reference_texts, query_texts, path, max_items=count,
+                writer_ids=writers,
+                header=f"TRAIN | epoch={epoch:03d} | global_step={global_step:08d} | seed={preview_seed}",
+                metadata=metadata)
+        finally:
+            for name, model in self.models.items():
+                model.train(modes[name])
+
     def train(self, max_batches: int = 0):
         self.create_logger()
         opt = self.opt
         # Deliberately instantiate only train_32.hdf5. test_32.hdf5 is first
         # touched by evaluate.py after the final epoch.
         train_dataset = SpiSGANHDF5Dataset(self.dataset_root, "train")
+        use_pinned_memory = self.device.type == "cuda"
+        num_workers = int(opt.training.num_workers)
         loader = DataLoader(train_dataset, batch_size=opt.training.batch_size, shuffle=True,
-                            drop_last=True, num_workers=opt.training.num_workers,
+                            drop_last=True, num_workers=num_workers,
+                            pin_memory=use_pinned_memory,
+                            persistent_workers=num_workers > 0,
                             collate_fn=collate_words)
         optimizers = Munch(
             G=torch.optim.Adam(chain(self.models.G.parameters(), self.models.E.parameters()),
@@ -144,11 +230,13 @@ class AdversarialModel(BaseModel):
         for epoch in range(1, int(opt.training.epochs) + 1):
             for batch_index, batch in enumerate(loader):
                 images, image_lens, labels, label_lens, writers, _ = batch
-                real = images.to(self.device)
-                real_lens = image_lens.to(self.device)
-                real_labels = labels.to(self.device).long()
-                real_label_lens = label_lens.to(self.device).long()
-                writers = writers.to(self.device)
+                real = images.to(self.device, non_blocking=use_pinned_memory)
+                real_lens = image_lens.to(self.device, non_blocking=use_pinned_memory)
+                real_labels = labels.to(
+                    self.device, dtype=torch.long, non_blocking=use_pinned_memory)
+                real_label_lens = label_lens.to(
+                    self.device, dtype=torch.long, non_blocking=use_pinned_memory)
+                writers = writers.to(self.device, non_blocking=use_pinned_memory)
 
                 self.set_mode("train")
                 optimizers.D.zero_grad(set_to_none=True)
@@ -202,11 +290,11 @@ class AdversarialModel(BaseModel):
                     kld = kl_loss(mu, logvar)
 
                     grad_adv = torch.autograd.grad(
-                        adv_loss, fake_cat, create_graph=True, retain_graph=True)[0]
+                        adv_loss, fake_cat, create_graph=False, retain_graph=True)[0]
                     grad_ctc = torch.autograd.grad(
-                        fake_ctc_loss, fake_ctc, create_graph=True, retain_graph=True)[0]
+                        fake_ctc_loss, fake_ctc, create_graph=False, retain_graph=True)[0]
                     grad_wid = torch.autograd.grad(
-                        fake_wid_loss, fake_wid_logits, create_graph=True, retain_graph=True)[0]
+                        fake_wid_loss, fake_wid_logits, create_graph=False, retain_graph=True)[0]
                     std_adv = grad_adv.std()
                     gp_ctc = (std_adv / (grad_ctc.std() + 1e-8)).detach().add(1).clamp_max(100)
                     gp_wid = (std_adv / (grad_wid.std() + 1e-8)).detach().add(1).clamp_max(10)
@@ -216,7 +304,7 @@ class AdversarialModel(BaseModel):
                                                       self.models.W.cnn_backbone)
                         info_loss = (reconstructed - random_z[:, 32:].detach()).abs().mean()
                         grad_info = torch.autograd.grad(
-                            info_loss, random_images, create_graph=True, retain_graph=True)[0]
+                            info_loss, random_images, create_graph=False, retain_graph=True)[0]
                         gp_info = (std_adv / (grad_info.std() + 1e-8)).detach().add(1)
                     else:
                         info_loss = adv_loss.new_zeros(())
@@ -242,6 +330,14 @@ class AdversarialModel(BaseModel):
                     for key, value in values.items():
                         self.writer.add_scalar(f"loss/{key}", value, iteration)
                     meters.reset_all()
+                global_step = iteration + 1
+                should_preview = (self.preview_every_steps > 0
+                                  and global_step % self.preview_every_steps == 0)
+                if max_batches and batch_index + 1 >= max_batches:
+                    should_preview = True
+                if should_preview:
+                    preview_path = self.save_training_preview(batch, epoch, global_step)
+                    self.print(f"Saved preview: {preview_path}")
                 iteration += 1
                 if max_batches and batch_index + 1 >= max_batches:
                     break

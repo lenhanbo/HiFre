@@ -9,11 +9,11 @@ import torch
 import torch.nn.functional as F
 from scipy import linalg
 from torch.utils.data import DataLoader
-from torchvision.utils import save_image
 
 from fid_kid.inception import InceptionV3
 from higan_frequency.data import SpiSGANHDF5Dataset, collate_words
 from higan_frequency.frequency import FrequencyStyleEncoder
+from higan_frequency.preview import save_preview
 from lib.utils import yaml2config
 from networks.BigGAN_networks import Generator
 from networks.module import WriterIdentifier
@@ -66,12 +66,6 @@ def fid_kid(real, fake):
     return fid, float(np.mean(scores) * 100.0)
 
 
-def fixed_preview_canvas(images, width=128):
-    if images.shape[-1] < width:
-        return F.pad(images, (0, width - images.shape[-1]), value=1.0)
-    return images[..., :width]
-
-
 @torch.inference_mode()
 def evaluate(config, dataset_root, checkpoint_path, output, max_samples=0):
     cfg = yaml2config(config)
@@ -94,8 +88,10 @@ def evaluate(config, dataset_root, checkpoint_path, output, max_samples=0):
     count = len(dataset) if max_samples <= 0 else min(len(dataset), int(max_samples))
     if count < 2:
         raise ValueError("FID/KID require at least two test samples")
+    use_pinned_memory = device.type == "cuda"
     loader = DataLoader(dataset, batch_size=cfg.evaluation.batch_size, shuffle=False,
-                        num_workers=0, collate_fn=collate_words)
+                        num_workers=0, pin_memory=use_pinned_memory,
+                        collate_fn=collate_words)
     block = InceptionV3.BLOCK_INDEX_BY_DIM[2048]
     inception = InceptionV3([block]).eval().to(device)
     rng = torch.Generator(device=device).manual_seed(int(cfg.evaluation.seed))
@@ -103,23 +99,45 @@ def evaluate(config, dataset_root, checkpoint_path, output, max_samples=0):
     processed = 0
     preview_path = Path(output).resolve().parent / "preview.png"
     for batch_index, batch in enumerate(loader):
-        images, lengths, labels, label_lens, _, _ = batch
+        images, lengths, labels, label_lens, writers, texts = batch
         remaining = count - processed
         if remaining <= 0:
             break
-        images, lengths = images[:remaining].to(device), lengths[:remaining]
-        labels, label_lens = labels[:remaining].to(device), label_lens[:remaining].to(device)
-        style = E(images, lengths.to(device), W.cnn_backbone)
+        images = images[:remaining].to(device, non_blocking=use_pinned_memory)
+        lengths = lengths[:remaining]
+        labels = labels[:remaining].to(device, non_blocking=use_pinned_memory)
+        label_lens = label_lens[:remaining].to(device, non_blocking=use_pinned_memory)
+        device_lengths = lengths.to(device, non_blocking=use_pinned_memory)
+        style = E(images, device_lengths, W.cnn_backbone)
         noise = torch.randn((len(images), 32), generator=rng, device=device)
         generated = G(torch.cat((noise, style), dim=1), labels, label_lens)
         generated_lens = label_lens * int(cfg.char_width)
         real_features.append(inception_features(inception, images, lengths, device))
         fake_features.append(inception_features(inception, generated, generated_lens.cpu(), device))
         if batch_index == 0:
-            preview = torch.cat((fixed_preview_canvas(images[:8]),
-                                 fixed_preview_canvas(generated[:8])), dim=0)
-            preview_path.parent.mkdir(parents=True, exist_ok=True)
-            save_image((preview + 1) / 2, preview_path, nrow=8, pad_value=1)
+            preview_count = min(int(cfg.training.preview_items), len(images))
+            preview_generator = torch.Generator(device=device).manual_seed(
+                int(cfg.evaluation.seed) + 1_000_003)
+            random_z_single = torch.randn(
+                (1, 128), generator=preview_generator, device=device)
+            random_images = G(
+                random_z_single.expand(preview_count, -1),
+                labels[:preview_count], label_lens[:preview_count])
+            save_preview(
+                images[:preview_count], device_lengths[:preview_count], random_images,
+                generated[:preview_count], generated_lens[:preview_count],
+                list(texts[:preview_count]), list(texts[:preview_count]), preview_path,
+                max_items=preview_count, writer_ids=writers[:preview_count].tolist(),
+                header=(f"FINAL EVALUATION | checkpoint=last.pth | "
+                        f"seed={int(cfg.evaluation.seed)}"),
+                metadata={
+                    "phase": "evaluation",
+                    "checkpoint": str(checkpoint_path),
+                    "seed": int(cfg.evaluation.seed),
+                    "latent_order": ["noise32", "low32", "original32", "high32"],
+                    "random_preview_z": random_z_single[0].float().cpu().tolist(),
+                    "frequency_vectors": style[:preview_count].float().cpu().tolist(),
+                })
         processed += len(images)
         if batch_index == 0 or processed == count or batch_index % int(cfg.evaluation.log_every) == 0:
             print(f"[evaluation] {processed}/{count}", flush=True)

@@ -54,7 +54,18 @@ frequency:
 training:
   style_reconstruction: true
   save_every_epochs: 5
+  preview_every_steps: 2000
+  preview_items: 16
 ```
+
+Training writes an annotated panel and companion JSON metadata file under
+`OUTPUT/previews/step_NNNNNNNN.{png,json}` every `preview_every_steps` optimizer
+iterations. Each row records its writer index, reference text, generated query,
+valid widths, deterministic preview seed, and compares the real reference,
+one shared random style, and `[noise, low, original, high]` reference style.
+Setting `preview_every_steps: 0` disables training previews. The smoke test always
+writes one preview, and final evaluation writes an annotated `preview.png` plus
+`preview.json` without opening the test split during training.
 
 When style reconstruction is disabled, `info_loss`, `grad_fake_info`, `gp_info`,
 and the associated generator-loss term are skipped; `info_loss` and `gp_info`

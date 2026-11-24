@@ -30,6 +30,17 @@ def test_fft_uses_height_and_width_and_ignores_external_padding():
     assert low[0, 0, 8, 31] != low[0, 0, 7, 32]
 
 
+def test_grouped_fft_matches_individual_width_processing():
+    images = torch.randn(4, 1, 32, 64)
+    lengths = torch.tensor([32, 57, 32, 57])
+    grouped_low, grouped_high = split_frequency_bands(images, lengths)
+    for index in range(len(images)):
+        single_low, single_high = split_frequency_bands(
+            images[index:index + 1], lengths[index:index + 1])
+        torch.testing.assert_close(grouped_low[index:index + 1], single_low)
+        torch.testing.assert_close(grouped_high[index:index + 1], single_high)
+
+
 class RecordingEncoder(torch.nn.Module):
     style_dim = 32
 

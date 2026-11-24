@@ -35,23 +35,36 @@ def split_frequency_bands(images: torch.Tensor, image_lens: torch.Tensor,
 
     source = images.float()
     canvas_width = source.shape[-1]
-    lows, highs = [], []
-    for image, raw_width in zip(source, image_lens):
-        width = int(raw_width.item())
+    # Copy all lengths to the host in one operation. Calling Tensor.item() for
+    # every sample serializes CUDA work once per image and is particularly
+    # expensive because this function is used several times per train step.
+    widths = [int(width) for width in image_lens.detach().cpu().tolist()]
+    groups: dict[int, list[int]] = {}
+    for index, width in enumerate(widths):
         if width < 1 or width > canvas_width:
             raise ValueError(f"invalid image width {width} for canvas {canvas_width}")
-        valid = image[..., :width]
+        groups.setdefault(width, []).append(index)
+
+    # Words with the same valid width can share a batched FFT and one frequency
+    # mask. Generated words have widths in multiples of char_width, so this
+    # removes many small sequential FFT launches without changing the result.
+    lows: list[torch.Tensor | None] = [None] * len(source)
+    highs: list[torch.Tensor | None] = [None] * len(source)
+    for width, indices in groups.items():
+        batch_indices = torch.as_tensor(indices, device=source.device, dtype=torch.long)
+        valid = source.index_select(0, batch_indices)[..., :width]
         height = valid.shape[-2]
         fy = torch.fft.fftfreq(height, device=valid.device, dtype=torch.float32)
         fx = torch.fft.fftfreq(width, device=valid.device, dtype=torch.float32)
         distance2 = (fy[:, None] / cutoff).square() + (fx[None, :] / cutoff).square()
-        low_mask = torch.exp(-0.5 * distance2)[None, ...]
+        low_mask = torch.exp(-0.5 * distance2)[None, None, ...]
         spectrum = torch.fft.fft2(valid, dim=(-2, -1))
         low = torch.fft.ifft2(spectrum * low_mask, dim=(-2, -1)).real
         high = valid - low
-        lows.append(_pad_right(low, canvas_width, padding_mode))
-        highs.append(_pad_right(high, canvas_width, padding_mode))
-    return torch.stack(lows), torch.stack(highs)
+        for group_index, source_index in enumerate(indices):
+            lows[source_index] = _pad_right(low[group_index], canvas_width, padding_mode)
+            highs[source_index] = _pad_right(high[group_index], canvas_width, padding_mode)
+    return torch.stack(lows), torch.stack(highs)  # type: ignore[arg-type]
 
 
 class FrequencyStyleEncoder(nn.Module):
