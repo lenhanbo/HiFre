@@ -12,6 +12,15 @@ single reference style with one shared 32-D style encoder applied in this order:
 The Gaussian FFT split is computed independently over every valid word width,
 uses `float32`, reflection padding, and does not clamp or normalize either band.
 
+Before production training starts, the full train split is scanned once and its
+low-frequency images are written to
+`OUTPUT/frequency_cache/train_32_low_float32.npy`. The mmap cache stores only
+`low`; each batch reconstructs `high = original - low`. Its JSON metadata binds
+the cache to the source path, size, modification time, cutoff, padding mode,
+shape, and dtype, so a matching cache is reused and a stale cache is rebuilt.
+Generated images still use differentiable FFT at runtime for style
+reconstruction because they change after every optimizer step.
+
 ## Data protocol
 
 Training uses all 66,603 images and 339 writers in `train_32.hdf5`. There is no
@@ -51,8 +60,10 @@ switches are:
 frequency:
   cutoff: 0.06
   padding_mode: reflect
+  precompute_train: true
+  precompute_batch_size: 64
 training:
-  max_hours: 10.0
+  max_hours: 4.0
   style_reconstruction: true
   save_every_epochs: 5
   preview_every_steps: 2000
@@ -70,9 +81,8 @@ writes one preview, and final evaluation writes an annotated `preview.png` plus
 
 `training.max_hours` is a soft wall-clock limit checked after every completed
 batch. At the limit, training writes a final annotated preview and `last.pth`,
-then the normal one-shot final evaluation runs from that checkpoint. The default
-is 10 hours so a 12-hour job retains time for checkpointing and full evaluation;
-set it to `0` to disable the limit. A partial epoch never receives an
+then the normal one-shot final evaluation runs from that checkpoint. The current
+configuration allows 4 training hours; set it to `0` to disable the limit. A partial epoch never receives an
 `epoch_NNN.pth` name.
 
 When style reconstruction is disabled, `info_loss`, `grad_fake_info`, `gp_info`,

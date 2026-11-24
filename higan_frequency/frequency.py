@@ -83,9 +83,15 @@ class FrequencyStyleEncoder(nn.Module):
         return self.encoder.style_dim * 3
 
     def forward(self, images: torch.Tensor, image_lens: torch.Tensor,
-                wid_cnn_backbone=None, vae_mode: bool = False):
-        low, high = split_frequency_bands(
-            images, image_lens, cutoff=self.cutoff, padding_mode=self.padding_mode)
+                wid_cnn_backbone=None, vae_mode: bool = False,
+                frequency_bands: tuple[torch.Tensor, torch.Tensor] | None = None):
+        if frequency_bands is None:
+            low, high = split_frequency_bands(
+                images, image_lens, cutoff=self.cutoff, padding_mode=self.padding_mode)
+        else:
+            low, high = frequency_bands
+            if low.shape != images.shape or high.shape != images.shape:
+                raise ValueError("precomputed frequency bands must match images")
         ordered = (low, images.float(), high)
         if not vae_mode:
             return torch.cat([

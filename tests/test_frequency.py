@@ -68,3 +68,18 @@ def test_frequency_encoder_shares_one_encoder_and_concatenates_low_original_high
         for index, call in enumerate(recorder.calls):
             expected = call.mean((1, 2, 3)) + offset
             torch.testing.assert_close(output[:, index * 32], expected)
+
+
+def test_frequency_encoder_accepts_precomputed_bands_in_the_same_order():
+    module = FrequencyStyleEncoder(style_dim=32, share_wid=False, init="none")
+    recorder = RecordingEncoder()
+    module.encoder = recorder
+    images = torch.randn(2, 1, 32, 48)
+    low = torch.full_like(images, 2.0)
+    high = torch.full_like(images, 3.0)
+    output = module(
+        images, torch.tensor([48, 48]), frequency_bands=(low, high))
+    assert recorder.calls[0] is low
+    assert recorder.calls[1] is images
+    assert recorder.calls[2] is high
+    assert output.shape == (2, 96)

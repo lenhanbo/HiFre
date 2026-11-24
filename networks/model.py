@@ -11,8 +11,10 @@ from munch import Munch
 from torch.nn import CTCLoss, CrossEntropyLoss
 from torch.utils.data import DataLoader
 
-from higan_frequency.data import SpiSGANHDF5Dataset, collate_words
+from higan_frequency.data import (FrequencyCachedDataset, SpiSGANHDF5Dataset,
+                                  collate_frequency_words, collate_words)
 from higan_frequency.frequency import FrequencyStyleEncoder
+from higan_frequency.frequency_cache import prepare_train_frequency_cache
 from higan_frequency.preview import save_preview
 from lib.alphabet import Alphabets, get_lexicon, strLabelConverter, word_capitalize
 from lib.utils import AverageMeterManager, get_logger, option_to_string
@@ -128,8 +130,10 @@ class AdversarialModel(BaseModel):
         labels, lengths = self.label_converter.encode(words)
         return labels.to(self.device).long(), lengths.to(self.device).long()
 
-    def _reference_latent(self, images, image_lens, vae_mode=True):
-        encoded = self.models.E(images, image_lens, self.models.W.cnn_backbone, vae_mode=vae_mode)
+    def _reference_latent(self, images, image_lens, vae_mode=True, frequency_bands=None):
+        encoded = self.models.E(
+            images, image_lens, self.models.W.cnn_backbone, vae_mode=vae_mode,
+            frequency_bands=frequency_bands)
         style = encoded[0] if vae_mode else encoded
         noise = torch.randn((len(images), 32), device=self.device)
         return torch.cat((noise, style), dim=1), encoded
@@ -143,7 +147,7 @@ class AdversarialModel(BaseModel):
         for model in self.models.values():
             model.eval()
         try:
-            images, image_lens, _, _, writers, reference_texts = batch
+            images, image_lens, _, _, writers, reference_texts = batch[:6]
             count = min(self.preview_items, len(images))
             images = images[:count].to(self.device)
             image_lens = image_lens[:count].to(self.device)
@@ -217,13 +221,23 @@ class AdversarialModel(BaseModel):
         # Deliberately instantiate only train_32.hdf5. test_32.hdf5 is first
         # touched by evaluate.py after the final epoch.
         train_dataset = SpiSGANHDF5Dataset(self.dataset_root, "train")
+        collate_fn = collate_words
+        if bool(opt.frequency.precompute_train) and not max_batches:
+            cache_path = prepare_train_frequency_cache(
+                train_dataset, self.log_root, self.device,
+                int(opt.frequency.precompute_batch_size), float(opt.frequency.cutoff),
+                str(opt.frequency.padding_mode), log=self.print)
+            train_dataset = FrequencyCachedDataset(train_dataset, cache_path)
+            collate_fn = collate_frequency_words
+        elif bool(opt.frequency.precompute_train) and max_batches:
+            self.print("Smoke test skips the full train frequency precompute")
         use_pinned_memory = self.device.type == "cuda"
         num_workers = int(opt.training.num_workers)
         loader = DataLoader(train_dataset, batch_size=opt.training.batch_size, shuffle=True,
                             drop_last=True, num_workers=num_workers,
                             pin_memory=use_pinned_memory,
                             persistent_workers=num_workers > 0,
-                            collate_fn=collate_words)
+                            collate_fn=collate_fn)
         optimizers = Munch(
             G=torch.optim.Adam(chain(self.models.G.parameters(), self.models.E.parameters()),
                                lr=opt.training.lr,
@@ -245,7 +259,7 @@ class AdversarialModel(BaseModel):
             self.print(f"Training time limit: {self.max_hours:.2f} hours")
         for epoch in range(1, int(opt.training.epochs) + 1):
             for batch_index, batch in enumerate(loader):
-                images, image_lens, labels, label_lens, writers, _ = batch
+                images, image_lens, labels, label_lens, writers, _ = batch[:6]
                 real = images.to(self.device, non_blocking=use_pinned_memory)
                 real_lens = image_lens.to(self.device, non_blocking=use_pinned_memory)
                 real_labels = labels.to(
@@ -253,6 +267,12 @@ class AdversarialModel(BaseModel):
                 real_label_lens = label_lens.to(
                     self.device, dtype=torch.long, non_blocking=use_pinned_memory)
                 writers = writers.to(self.device, non_blocking=use_pinned_memory)
+                frequency_bands = None
+                if len(batch) == 8:
+                    frequency_bands = (
+                        batch[6].to(self.device, non_blocking=use_pinned_memory),
+                        batch[7].to(self.device, non_blocking=use_pinned_memory),
+                    )
 
                 self.set_mode("train")
                 optimizers.D.zero_grad(set_to_none=True)
@@ -266,7 +286,8 @@ class AdversarialModel(BaseModel):
                     fake_labels, fake_label_lens = self._random_labels(len(real))
                     random_z = torch.randn((len(real), 128), device=self.device)
                     random_images = self._generate(random_z, fake_labels, fake_label_lens)
-                    reference_z, _ = self._reference_latent(real, real_lens)
+                    reference_z, _ = self._reference_latent(
+                        real, real_lens, frequency_bands=frequency_bands)
                     reference_images = self._generate(reference_z, fake_labels, fake_label_lens)
                     fake_cat = torch.cat((random_images, reference_images), dim=0)
                     fake_lens_cat = (fake_label_lens * opt.char_width).repeat(2)
@@ -290,7 +311,8 @@ class AdversarialModel(BaseModel):
                     fake_lens = fake_label_lens * opt.char_width
                     random_z = torch.randn((len(real), 128), device=self.device)
                     random_images = self._generate(random_z, fake_labels, fake_label_lens)
-                    reference_z, (_, mu, logvar) = self._reference_latent(real, real_lens)
+                    reference_z, (_, mu, logvar) = self._reference_latent(
+                        real, real_lens, frequency_bands=frequency_bands)
                     reference_images = self._generate(reference_z, fake_labels, fake_label_lens)
                     fake_cat = torch.cat((random_images, reference_images), dim=0)
                     labels_cat = fake_labels.repeat(2, 1)

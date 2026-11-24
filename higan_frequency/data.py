@@ -5,6 +5,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset
 
 from lib.alphabet import Alphabets, strLabelConverter
@@ -77,6 +78,49 @@ class SpiSGANHDF5Dataset(Dataset):
         self.close()
 
 
+class FrequencyCachedDataset(Dataset):
+    """Attach a memory-mapped low-frequency cache to the official train split."""
+
+    def __init__(self, dataset: SpiSGANHDF5Dataset, cache_path: str | Path):
+        if dataset.split != "train":
+            raise ValueError("frequency caching is only supported for the train split")
+        self.dataset = dataset
+        self.cache_path = Path(cache_path).resolve()
+        self._frequency_low = None
+
+    def _cache(self):
+        if self._frequency_low is None:
+            self._frequency_low = np.load(self.cache_path, mmap_mode="r")
+        return self._frequency_low
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, index: int):
+        image, label, writer, text = self.dataset[index]
+        start = int(self.dataset.img_seek_idxs[index])
+        width = int(self.dataset.img_lens[index])
+        low = np.asarray(
+            self._cache()[:, start:start + width], dtype=np.float32).copy()
+        return image, label, writer, text, torch.from_numpy(low).unsqueeze(0)
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state["_frequency_low"] = None
+        return state
+
+
+def _pad_band_right(image: torch.Tensor, width: int) -> torch.Tensor:
+    amount = width - image.shape[-1]
+    while amount > 0:
+        if image.shape[-1] <= 1:
+            return F.pad(image, (0, amount), mode="replicate")
+        step = min(amount, image.shape[-1] - 1)
+        image = F.pad(image, (0, step), mode="reflect")
+        amount -= step
+    return image
+
+
 def collate_words(batch):
     images, labels, writers, texts = zip(*batch)
     valid_lens = torch.tensor([image.shape[-1] for image in images], dtype=torch.int32)
@@ -90,3 +134,19 @@ def collate_words(batch):
         padded_labels[index, :len(label)] = label
     return (padded, valid_lens, padded_labels, label_lens,
             torch.tensor(writers, dtype=torch.long), list(texts))
+
+
+def collate_frequency_words(batch):
+    standard = collate_words([item[:4] for item in batch])
+    images, valid_lens = standard[:2]
+    canvas_width = images.shape[-1]
+    padded_low, padded_high = [], []
+    for item, width in zip(batch, valid_lens.tolist()):
+        low = item[4].float()
+        original = item[0].float()
+        if low.shape != original.shape:
+            raise ValueError("cached low-frequency image shape does not match original")
+        high = original - low
+        padded_low.append(_pad_band_right(low, canvas_width))
+        padded_high.append(_pad_band_right(high, canvas_width))
+    return standard + (torch.stack(padded_low), torch.stack(padded_high))

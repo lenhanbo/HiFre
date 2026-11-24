@@ -7,6 +7,8 @@ char_width: 16
 frequency:
   cutoff: 0.06
   padding_mode: reflect
+  precompute_train: true
+  precompute_batch_size: 64
 
 training:
   epochs: 70

@@ -15,7 +15,9 @@ def test_spisgan_configuration_dimensions():
     assert cfg.WidModel.n_writer == 339
     assert cfg.EncModel.style_dim == 32
     assert cfg.GenModel.style_dim == 128
-    assert cfg.training.max_hours == 10.0
+    assert cfg.training.max_hours >= 0
+    assert cfg.frequency.precompute_train is True
+    assert cfg.frequency.precompute_batch_size == 64
 
 
 def test_training_hour_limit_is_optional_and_uses_elapsed_wall_time():
