@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from lib.alphabet import Alphabets
@@ -15,6 +16,8 @@ def test_spisgan_configuration_dimensions():
     assert cfg.WidModel.n_writer == 339
     assert cfg.EncModel.style_dim == 32
     assert cfg.GenModel.style_dim == 128
+    assert cfg.architecture.generator_variant == "additive_style"
+    assert cfg.architecture.additive_style.injection_strength == 1.0
     assert cfg.training.max_hours >= 0
     assert cfg.frequency.precompute_train is True
     assert cfg.frequency.precompute_batch_size == 64
@@ -24,6 +27,16 @@ def test_training_hour_limit_is_optional_and_uses_elapsed_wall_time():
     assert not training_time_limit_reached(100.0, 0.0, now=100000.0)
     assert not training_time_limit_reached(100.0, 2.0, now=7299.9)
     assert training_time_limit_reached(100.0, 2.0, now=7300.0)
+
+
+def test_kaggle_notebook_exposes_runtime_and_frequency_cache_controls():
+    notebook = json.loads(
+        (ROOT / "kaggle" / "higan_frequency.ipynb").read_text(encoding="utf-8"))
+    source = "\n".join(
+        "".join(cell.get("source", [])) for cell in notebook["cells"])
+    for name in ("GENERATOR_VARIANT", "MAX_HOURS", "PRECOMPUTE_FREQUENCY", "PRECOMPUTE_BATCH_SIZE",
+                 "PREVIEW_EVERY_STEPS", "PREVIEW_ITEMS"):
+        assert name in source
 
 
 def test_training_has_no_validation_best_or_test_dataset_path():

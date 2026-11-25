@@ -4,6 +4,12 @@ seed: 123456
 img_height: 32
 char_width: 16
 
+architecture:
+# 
+  generator_variant: additive_style
+  additive_style:
+    injection_strength: 1.0
+
 frequency:
   cutoff: 0.06
   padding_mode: reflect

@@ -57,6 +57,10 @@ Configuration lives in [configs/config.yaml](configs/config.yaml). The relevant
 switches are:
 
 ```yaml
+architecture:
+  generator_variant: additive_style  # use baseline for the untouched HiGAN Generator
+  additive_style:
+    injection_strength: 1.0
 frequency:
   cutoff: 0.06
   padding_mode: reflect
@@ -69,6 +73,11 @@ training:
   preview_every_steps: 2000
   preview_items: 16
 ```
+
+The additive experiment lives in a separate generator module. It keeps the
+upstream HiGAN `Generator`, `Discriminator`, `Recognizer`, and
+`WriterIdentifier` unchanged. Checkpoints record the selected generator variant;
+legacy checkpoints without this metadata are accepted only in `baseline` mode.
 
 Training writes an annotated panel and companion JSON metadata file under
 `OUTPUT/previews/step_NNNNNNNN.{png,json}` every `preview_every_steps` optimizer

@@ -15,7 +15,7 @@ from higan_frequency.data import SpiSGANHDF5Dataset, collate_words
 from higan_frequency.frequency import FrequencyStyleEncoder
 from higan_frequency.preview import save_preview
 from lib.utils import yaml2config
-from networks.BigGAN_networks import Generator
+from networks.generator import build_generator, validate_checkpoint_architecture
 from networks.module import WriterIdentifier
 
 
@@ -74,7 +74,8 @@ def evaluate(config, dataset_root, checkpoint_path, output, max_samples=0):
     if checkpoint_path.name != "last.pth":
         raise ValueError("final evaluation must load last.pth")
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    G = Generator(**cfg.GenModel).to(device)
+    validate_checkpoint_architecture(checkpoint, cfg.architecture)
+    G = build_generator(cfg.GenModel, cfg.architecture).to(device)
     E = FrequencyStyleEncoder(cutoff=cfg.frequency.cutoff,
                               padding_mode=cfg.frequency.padding_mode,
                               **cfg.EncModel).to(device)
@@ -129,9 +130,10 @@ def evaluate(config, dataset_root, checkpoint_path, output, max_samples=0):
                 list(texts[:preview_count]), list(texts[:preview_count]), preview_path,
                 max_items=preview_count, writer_ids=writers[:preview_count].tolist(),
                 header=(f"FINAL EVALUATION | checkpoint=last.pth | "
-                        f"seed={int(cfg.evaluation.seed)}"),
+                        f"variant={G.generator_variant} | seed={int(cfg.evaluation.seed)}"),
                 metadata={
                     "phase": "evaluation",
+                    "generator_variant": G.generator_variant,
                     "checkpoint": str(checkpoint_path),
                     "seed": int(cfg.evaluation.seed),
                     "latent_order": ["noise32", "low32", "original32", "high32"],
@@ -145,6 +147,7 @@ def evaluate(config, dataset_root, checkpoint_path, output, max_samples=0):
     fid, kid = fid_kid(np.concatenate(real_features), np.concatenate(fake_features))
     metrics = {
         "checkpoint": str(checkpoint_path), "samples": processed,
+        "generator_variant": G.generator_variant,
         "fid": fid, "kid": kid, "scope": "global SpiS-GAN test replication",
         "preprocessing": "fixed 32x128 white-pad/crop", "preview": str(preview_path),
     }

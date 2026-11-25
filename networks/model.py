@@ -18,7 +18,9 @@ from higan_frequency.frequency_cache import prepare_train_frequency_cache
 from higan_frequency.preview import save_preview
 from lib.alphabet import Alphabets, get_lexicon, strLabelConverter, word_capitalize
 from lib.utils import AverageMeterManager, get_logger, option_to_string
-from networks.BigGAN_networks import Discriminator, Generator
+from networks.BigGAN_networks import Discriminator
+from networks.generator import (architecture_metadata, build_generator,
+                                validate_checkpoint_architecture)
 from networks.module import Recognizer, WriterIdentifier
 from networks.utils import get_scheduler, idx_to_words, rand_clip, set_requires_grad
 
@@ -73,6 +75,7 @@ class BaseModel:
         torch.save({
             "models": {name: model.state_dict() for name, model in self.models.items()},
             "epoch": int(epoch),
+            "architecture": architecture_metadata(self.opt.architecture),
             "frequency": {"cutoff": float(self.opt.frequency.cutoff),
                           "padding_mode": str(self.opt.frequency.padding_mode)},
             "alphabet": "spisgan_iam",
@@ -81,6 +84,7 @@ class BaseModel:
 
     def load(self, path: str | Path):
         checkpoint = torch.load(path, map_location=self.device)
+        validate_checkpoint_architecture(checkpoint, self.opt.architecture)
         for name, model in self.models.items():
             model.load_state_dict(checkpoint["models"][name])
         return checkpoint
@@ -103,7 +107,7 @@ class AdversarialModel(BaseModel):
         self.lexicon = get_lexicon(opt.training.lexicon, Alphabets["spisgan_iam"],
                                    max_length=opt.training.max_word_len)
         self.models = Munch(
-            G=Generator(**opt.GenModel).to(self.device),
+            G=build_generator(opt.GenModel, opt.architecture).to(self.device),
             D=Discriminator(**opt.DiscModel).to(self.device),
             R=Recognizer(**opt.OcrModel).to(self.device),
             E=FrequencyStyleEncoder(cutoff=opt.frequency.cutoff,
@@ -186,6 +190,7 @@ class AdversarialModel(BaseModel):
 
             metadata = {
                 "phase": "training",
+                "generator_variant": self.models.G.generator_variant,
                 "epoch": int(epoch),
                 "global_step": int(global_step),
                 "seed": preview_seed,
