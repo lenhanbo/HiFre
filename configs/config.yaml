@@ -5,7 +5,7 @@ img_height: 32
 char_width: 16
 
 architecture:
-  generator_variant: stylegan2
+  generator_variant: baseline
   stylegan2:
     demodulate: true
     spatial_noise: false
