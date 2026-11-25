@@ -15,6 +15,7 @@ ROOT = Path(__file__).parents[1]
 
 def config():
     cfg = yaml2config(ROOT / "configs" / "config.yaml")
+    cfg.architecture.generator_variant = "stylegan2"
     cfg.GenModel.init = "none"
     cfg.GenModel.G_ch = 4
     cfg.GenModel.G_attn = "64"

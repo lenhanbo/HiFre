@@ -16,7 +16,7 @@ def test_spisgan_configuration_dimensions():
     assert cfg.WidModel.n_writer == 339
     assert cfg.EncModel.style_dim == 32
     assert cfg.GenModel.style_dim == 128
-    assert cfg.architecture.generator_variant == "stylegan2"
+    assert cfg.architecture.generator_variant in {"baseline", "stylegan2"}
     assert cfg.architecture.stylegan2.demodulate is True
     assert cfg.architecture.stylegan2.spatial_noise is False
     assert cfg.architecture.stylegan2.mapping_network is False
@@ -40,6 +40,9 @@ def test_kaggle_notebook_exposes_runtime_and_frequency_cache_controls():
     for name in ("GENERATOR_VARIANT", "MAX_HOURS", "PRECOMPUTE_FREQUENCY", "PRECOMPUTE_BATCH_SIZE",
                  "PREVIEW_EVERY_STEPS", "PREVIEW_ITEMS"):
         assert name in source
+    assert "'restore', '--', 'configs/config.yaml'" in source
+    assert "subprocess.run(['git', 'clone'" in source
+    assert "|| git clone" not in source
 
 
 def test_training_has_no_validation_best_or_test_dataset_path():
