@@ -58,9 +58,12 @@ switches are:
 
 ```yaml
 architecture:
-  generator_variant: additive_style  # use baseline for the untouched HiGAN Generator
-  additive_style:
-    injection_strength: 1.0
+  generator_variant: stylegan2  # use baseline for the untouched HiGAN Generator
+  stylegan2:
+    demodulate: true
+    spatial_noise: false
+    mapping_network: false
+    skip_to_image: true
 frequency:
   cutoff: 0.06
   padding_mode: reflect
@@ -74,7 +77,7 @@ training:
   preview_items: 16
 ```
 
-The additive experiment lives in a separate generator module. It keeps the
+The StyleGAN2-modulation experiment lives in a separate generator module. It keeps the
 upstream HiGAN `Generator`, `Discriminator`, `Recognizer`, and
 `WriterIdentifier` unchanged. Checkpoints record the selected generator variant;
 legacy checkpoints without this metadata are accepted only in `baseline` mode.

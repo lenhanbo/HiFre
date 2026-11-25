@@ -16,8 +16,11 @@ def test_spisgan_configuration_dimensions():
     assert cfg.WidModel.n_writer == 339
     assert cfg.EncModel.style_dim == 32
     assert cfg.GenModel.style_dim == 128
-    assert cfg.architecture.generator_variant == "additive_style"
-    assert cfg.architecture.additive_style.injection_strength == 1.0
+    assert cfg.architecture.generator_variant == "stylegan2"
+    assert cfg.architecture.stylegan2.demodulate is True
+    assert cfg.architecture.stylegan2.spatial_noise is False
+    assert cfg.architecture.stylegan2.mapping_network is False
+    assert cfg.architecture.stylegan2.skip_to_image is True
     assert cfg.training.max_hours >= 0
     assert cfg.frequency.precompute_train is True
     assert cfg.frequency.precompute_batch_size == 64
