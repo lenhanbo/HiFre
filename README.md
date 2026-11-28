@@ -1,13 +1,21 @@
 # HiGAN-Frequency
 
 HiGAN-Frequency keeps the original HiGAN generator, discriminator, recognizer,
-writer identifier, objectives, and adaptive gradient balancing. It replaces the
-single reference style with one shared 32-D style encoder applied in this order:
+writer identifier, objectives, and adaptive gradient balancing. Three
+band-specific encoders are fused into one learned 96-D style representation:
 
 ```text
-[noise32 | low-frequency32 | original32 | high-frequency32]
-              GBlock@8          @16             @32
+[low32, original32, high32] → cross-band fusion → fused style96
+                                                    ↓
+                                     [noise32 | fused style96]
 ```
+
+Low frequency uses a multi-scale 2-D glyph encoder, original pixels use the
+unchanged HiGAN `StyleEncoder`, and high frequency uses aggregated horizontal
+`1xL` and vertical `Lx1` kernels. Cross-band attention and an MLP fuse all three
+features before HiGAN splits the unified style hierarchically. There is no fixed
+band-to-GBlock assignment. The original-pixel HiGAN encoder remains the VAE
+anchor for KL; style reconstruction operates on the fused 96-D style.
 
 The Gaussian FFT split is computed independently over every valid word width,
 uses `float32`, reflection padding, and does not clamp or normalize either band.
@@ -57,18 +65,17 @@ Configuration lives in [configs/config.yaml](configs/config.yaml). The relevant
 switches are:
 
 ```yaml
-architecture:
-  generator_variant: stylegan2  # use baseline for the untouched HiGAN Generator
-  stylegan2:
-    demodulate: true
-    spatial_noise: false
-    mapping_network: false
-    skip_to_image: true
 frequency:
   cutoff: 0.06
   padding_mode: reflect
   precompute_train: true
   precompute_batch_size: 64
+  encoder_variant: band_fusion_v1
+  band_encoders:
+    low_kernel_sizes: [3, 5]
+    high_directional_lengths: [3, 5, 7]
+    fusion_heads: 4
+    fusion_hidden_dim: 192
 training:
   max_hours: 4.0
   style_reconstruction: true
@@ -77,10 +84,9 @@ training:
   preview_items: 16
 ```
 
-The StyleGAN2-modulation experiment lives in a separate generator module. It keeps the
-upstream HiGAN `Generator`, `Discriminator`, `Recognizer`, and
-`WriterIdentifier` unchanged. Checkpoints record the selected generator variant;
-legacy checkpoints without this metadata are accepted only in `baseline` mode.
+The upstream HiGAN `Generator`, `Discriminator`, `Recognizer`, and
+`WriterIdentifier` remain unchanged. Frequency conditioning supplies the
+hierarchical Generator latent in `[noise, low, original, high]` order.
 
 Training writes an annotated panel and companion JSON metadata file under
 `OUTPUT/previews/step_NNNNNNNN.{png,json}` every `preview_every_steps` optimizer

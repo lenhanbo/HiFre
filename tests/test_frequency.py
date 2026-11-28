@@ -54,32 +54,67 @@ class RecordingEncoder(torch.nn.Module):
         return (value, value + 10, value + 20) if vae_mode else value
 
 
-def test_frequency_encoder_shares_one_encoder_and_concatenates_low_original_high():
-    module = FrequencyStyleEncoder(style_dim=32, share_wid=False, init="none")
-    recorder = RecordingEncoder()
-    module.encoder = recorder
+class RecordingFusion(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.calls = []
+
+    def forward(self, low, pixel, high):
+        self.calls.append((low, pixel, high))
+        return torch.cat((low, pixel, high), dim=1)
+
+
+def small_band_config():
+    return {
+        "base_channels": 4, "max_channels": 8, "norm_groups": 2,
+        "init": "none", "low_kernel_sizes": [3, 5], "low_dilation": 2,
+        "high_directional_lengths": [3, 5],
+    }
+
+
+def test_frequency_encoder_uses_band_specific_encoders_and_pixel_vae_anchor():
+    module = FrequencyStyleEncoder(
+        style_dim=32, share_wid=False, init="none", band_config=small_band_config())
+    low_recorder = RecordingEncoder()
+    pixel_recorder = RecordingEncoder()
+    high_recorder = RecordingEncoder()
+    module.low_encoder = low_recorder
+    module.pixel_encoder = pixel_recorder
+    module.high_encoder = high_recorder
+    fusion = RecordingFusion()
+    module.fusion = fusion
     images = torch.randn(2, 1, 32, 48)
     lengths = torch.tensor([39, 48])
     z, mu, logvar = module(images, lengths, vae_mode=True)
-    assert len(recorder.calls) == 3
-    assert recorder.calls[1] is images
-    assert z.shape == mu.shape == logvar.shape == (2, 96)
-    for output, offset in ((z, 0), (mu, 10), (logvar, 20)):
-        for index, call in enumerate(recorder.calls):
-            expected = call.mean((1, 2, 3)) + offset
-            torch.testing.assert_close(output[:, index * 32], expected)
+    assert len(low_recorder.calls) == len(pixel_recorder.calls) == len(high_recorder.calls) == 1
+    assert len(fusion.calls) == 1
+    assert pixel_recorder.calls[0] is images
+    assert z.shape == (2, 96)
+    assert mu.shape == logvar.shape == (2, 32)
+    expected_calls = (low_recorder.calls[0], images, high_recorder.calls[0])
+    for index, call in enumerate(expected_calls):
+        expected = call.mean((1, 2, 3))
+        torch.testing.assert_close(z[:, index * 32], expected)
+    expected_pixel = images.mean((1, 2, 3))
+    torch.testing.assert_close(mu[:, 0], expected_pixel + 10)
+    torch.testing.assert_close(logvar[:, 0], expected_pixel + 20)
 
 
 def test_frequency_encoder_accepts_precomputed_bands_in_the_same_order():
     module = FrequencyStyleEncoder(style_dim=32, share_wid=False, init="none")
-    recorder = RecordingEncoder()
-    module.encoder = recorder
+    low_recorder = RecordingEncoder()
+    pixel_recorder = RecordingEncoder()
+    high_recorder = RecordingEncoder()
+    module.low_encoder = low_recorder
+    module.pixel_encoder = pixel_recorder
+    module.high_encoder = high_recorder
+    module.fusion = RecordingFusion()
     images = torch.randn(2, 1, 32, 48)
     low = torch.full_like(images, 2.0)
     high = torch.full_like(images, 3.0)
     output = module(
         images, torch.tensor([48, 48]), frequency_bands=(low, high))
-    assert recorder.calls[0] is low
-    assert recorder.calls[1] is images
-    assert recorder.calls[2] is high
+    assert low_recorder.calls[0] is low
+    assert pixel_recorder.calls[0] is images
+    assert high_recorder.calls[0] is high
     assert output.shape == (2, 96)

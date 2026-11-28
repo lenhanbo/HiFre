@@ -13,14 +13,12 @@ from torch.utils.data import DataLoader
 
 from higan_frequency.data import (FrequencyCachedDataset, SpiSGANHDF5Dataset,
                                   collate_frequency_words, collate_words)
-from higan_frequency.frequency import FrequencyStyleEncoder
+from higan_frequency.frequency import FREQUENCY_ENCODER_VARIANT, FrequencyStyleEncoder
 from higan_frequency.frequency_cache import prepare_train_frequency_cache
 from higan_frequency.preview import save_preview
 from lib.alphabet import Alphabets, get_lexicon, strLabelConverter, word_capitalize
 from lib.utils import AverageMeterManager, get_logger, option_to_string
-from networks.BigGAN_networks import Discriminator
-from networks.generator import (architecture_metadata, build_generator,
-                                validate_checkpoint_architecture)
+from networks.BigGAN_networks import Discriminator, Generator
 from networks.module import Recognizer, WriterIdentifier
 from networks.utils import get_scheduler, idx_to_words, rand_clip, set_requires_grad
 
@@ -75,16 +73,21 @@ class BaseModel:
         torch.save({
             "models": {name: model.state_dict() for name, model in self.models.items()},
             "epoch": int(epoch),
-            "architecture": architecture_metadata(self.opt.architecture),
             "frequency": {"cutoff": float(self.opt.frequency.cutoff),
-                          "padding_mode": str(self.opt.frequency.padding_mode)},
+                          "padding_mode": str(self.opt.frequency.padding_mode),
+                          "encoder_variant": FREQUENCY_ENCODER_VARIANT},
             "alphabet": "spisgan_iam",
         }, path)
         return path
 
     def load(self, path: str | Path):
         checkpoint = torch.load(path, map_location=self.device)
-        validate_checkpoint_architecture(checkpoint, self.opt.architecture)
+        variant = checkpoint.get("frequency", {}).get("encoder_variant")
+        if variant != FREQUENCY_ENCODER_VARIANT:
+            raise ValueError(
+                "checkpoint frequency encoder mismatch: "
+                f"checkpoint={variant!r}, configured={FREQUENCY_ENCODER_VARIANT!r}; "
+                "band-specific encoders require retraining")
         for name, model in self.models.items():
             model.load_state_dict(checkpoint["models"][name])
         return checkpoint
@@ -103,15 +106,19 @@ class AdversarialModel(BaseModel):
             raise ValueError("SpiS-GAN train split requires WidModel.n_writer=339")
         if int(opt.GenModel.style_dim) != 128 or int(opt.EncModel.style_dim) != 32:
             raise ValueError("frequency conditioning requires GenModel.style_dim=128 and EncModel.style_dim=32")
+        if str(opt.frequency.encoder_variant) != FREQUENCY_ENCODER_VARIANT:
+            raise ValueError(
+                f"frequency.encoder_variant must be {FREQUENCY_ENCODER_VARIANT!r}")
 
         self.lexicon = get_lexicon(opt.training.lexicon, Alphabets["spisgan_iam"],
                                    max_length=opt.training.max_word_len)
         self.models = Munch(
-            G=build_generator(opt.GenModel, opt.architecture).to(self.device),
+            G=Generator(**opt.GenModel).to(self.device),
             D=Discriminator(**opt.DiscModel).to(self.device),
             R=Recognizer(**opt.OcrModel).to(self.device),
             E=FrequencyStyleEncoder(cutoff=opt.frequency.cutoff,
                                     padding_mode=opt.frequency.padding_mode,
+                                    band_config=opt.frequency.band_encoders,
                                     **opt.EncModel).to(self.device),
             W=WriterIdentifier(**opt.WidModel).to(self.device),
         )
@@ -190,11 +197,11 @@ class AdversarialModel(BaseModel):
 
             metadata = {
                 "phase": "training",
-                "generator_variant": self.models.G.generator_variant,
                 "epoch": int(epoch),
                 "global_step": int(global_step),
                 "seed": preview_seed,
-                "latent_order": ["noise32", "low32", "original32", "high32"],
+                "latent_order": ["noise32", "fused_style96"],
+                "frequency_encoder_variant": FREQUENCY_ENCODER_VARIANT,
                 "frequency": {
                     "cutoff": float(self.opt.frequency.cutoff),
                     "padding_mode": str(self.opt.frequency.padding_mode),
@@ -204,9 +211,9 @@ class AdversarialModel(BaseModel):
                     "z": random_z_single[0].float().cpu().tolist(),
                 },
                 "reference_style": {
-                    "definition": "Per-row [noise32, low32, original32, high32].",
+                    "definition": "Per-row [noise32, fused multiband style96].",
                     "noise": reference_noise.float().cpu().tolist(),
-                    "frequency_vectors": frequency_style.float().cpu().tolist(),
+                    "fused_style_vectors": frequency_style.float().cpu().tolist(),
                 },
             }
             path = Path(self.log_root, "previews", f"step_{global_step:08d}.png")
@@ -343,8 +350,8 @@ class AdversarialModel(BaseModel):
                     gp_wid = (std_adv / (grad_wid.std() + 1e-8)).detach().add(1).clamp_max(10)
 
                     if self.style_reconstruction:
-                        reconstructed = self.models.E(random_images, fake_lens,
-                                                      self.models.W.cnn_backbone)
+                        reconstructed = self.models.E(
+                            random_images, fake_lens, self.models.W.cnn_backbone)
                         info_loss = (reconstructed - random_z[:, 32:].detach()).abs().mean()
                         grad_info = torch.autograd.grad(
                             info_loss, random_images, create_graph=False, retain_graph=True)[0]

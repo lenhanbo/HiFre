@@ -53,7 +53,7 @@ def save_preview(reference: torch.Tensor, reference_lengths: torch.Tensor,
     titles = [
         "REAL STYLE REFERENCE",
         "RANDOM STYLE (one shared z)",
-        "FREQUENCY STYLE [noise|low|original|high]",
+        "FUSED MULTIBAND STYLE [noise|fused96]",
     ]
     font = _font()
     scratch = Image.new("L", (1, 1), color=255)

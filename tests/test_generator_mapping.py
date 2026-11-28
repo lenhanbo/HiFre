@@ -6,7 +6,7 @@ from lib.utils import yaml2config
 from networks.BigGAN_networks import Generator
 
 
-def test_generator_receives_low_original_high_in_three_gblocks():
+def test_generator_receives_three_hierarchical_chunks_from_fused_style():
     root = Path(__file__).parents[1]
     cfg = yaml2config(root / "configs" / "config.yaml")
     cfg.GenModel.init = "none"

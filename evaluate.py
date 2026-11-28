@@ -12,10 +12,10 @@ from torch.utils.data import DataLoader
 
 from fid_kid.inception import InceptionV3
 from higan_frequency.data import SpiSGANHDF5Dataset, collate_words
-from higan_frequency.frequency import FrequencyStyleEncoder
+from higan_frequency.frequency import FREQUENCY_ENCODER_VARIANT, FrequencyStyleEncoder
 from higan_frequency.preview import save_preview
 from lib.utils import yaml2config
-from networks.generator import build_generator, validate_checkpoint_architecture
+from networks.BigGAN_networks import Generator
 from networks.module import WriterIdentifier
 
 
@@ -69,15 +69,23 @@ def fid_kid(real, fake):
 @torch.inference_mode()
 def evaluate(config, dataset_root, checkpoint_path, output, max_samples=0):
     cfg = yaml2config(config)
+    if str(cfg.frequency.encoder_variant) != FREQUENCY_ENCODER_VARIANT:
+        raise ValueError(
+            f"frequency.encoder_variant must be {FREQUENCY_ENCODER_VARIANT!r}")
     device = torch.device(cfg.device)
     checkpoint_path = Path(checkpoint_path).resolve()
     if checkpoint_path.name != "last.pth":
         raise ValueError("final evaluation must load last.pth")
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    validate_checkpoint_architecture(checkpoint, cfg.architecture)
-    G = build_generator(cfg.GenModel, cfg.architecture).to(device)
+    variant = checkpoint.get("frequency", {}).get("encoder_variant")
+    if variant != FREQUENCY_ENCODER_VARIANT:
+        raise ValueError(
+            "checkpoint frequency encoder mismatch: "
+            f"checkpoint={variant!r}, configured={FREQUENCY_ENCODER_VARIANT!r}")
+    G = Generator(**cfg.GenModel).to(device)
     E = FrequencyStyleEncoder(cutoff=cfg.frequency.cutoff,
                               padding_mode=cfg.frequency.padding_mode,
+                              band_config=cfg.frequency.band_encoders,
                               **cfg.EncModel).to(device)
     W = WriterIdentifier(**cfg.WidModel).to(device)
     for name, model in (("G", G), ("E", E), ("W", W)):
@@ -130,15 +138,15 @@ def evaluate(config, dataset_root, checkpoint_path, output, max_samples=0):
                 list(texts[:preview_count]), list(texts[:preview_count]), preview_path,
                 max_items=preview_count, writer_ids=writers[:preview_count].tolist(),
                 header=(f"FINAL EVALUATION | checkpoint=last.pth | "
-                        f"variant={G.generator_variant} | seed={int(cfg.evaluation.seed)}"),
+                        f"seed={int(cfg.evaluation.seed)}"),
                 metadata={
                     "phase": "evaluation",
-                    "generator_variant": G.generator_variant,
                     "checkpoint": str(checkpoint_path),
                     "seed": int(cfg.evaluation.seed),
-                    "latent_order": ["noise32", "low32", "original32", "high32"],
+                    "latent_order": ["noise32", "fused_style96"],
+                    "frequency_encoder_variant": FREQUENCY_ENCODER_VARIANT,
                     "random_preview_z": random_z_single[0].float().cpu().tolist(),
-                    "frequency_vectors": style[:preview_count].float().cpu().tolist(),
+                    "fused_style_vectors": style[:preview_count].float().cpu().tolist(),
                 })
         processed += len(images)
         if batch_index == 0 or processed == count or batch_index % int(cfg.evaluation.log_every) == 0:
@@ -147,7 +155,7 @@ def evaluate(config, dataset_root, checkpoint_path, output, max_samples=0):
     fid, kid = fid_kid(np.concatenate(real_features), np.concatenate(fake_features))
     metrics = {
         "checkpoint": str(checkpoint_path), "samples": processed,
-        "generator_variant": G.generator_variant,
+        "frequency_encoder_variant": FREQUENCY_ENCODER_VARIANT,
         "fid": fid, "kid": kid, "scope": "global SpiS-GAN test replication",
         "preprocessing": "fixed 32x128 white-pad/crop", "preview": str(preview_path),
     }

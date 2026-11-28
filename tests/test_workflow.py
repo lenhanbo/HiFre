@@ -16,14 +16,13 @@ def test_spisgan_configuration_dimensions():
     assert cfg.WidModel.n_writer == 339
     assert cfg.EncModel.style_dim == 32
     assert cfg.GenModel.style_dim == 128
-    assert cfg.architecture.generator_variant in {"baseline", "stylegan2"}
-    assert cfg.architecture.stylegan2.demodulate is True
-    assert cfg.architecture.stylegan2.spatial_noise is False
-    assert cfg.architecture.stylegan2.mapping_network is False
-    assert cfg.architecture.stylegan2.skip_to_image is True
     assert cfg.training.max_hours >= 0
     assert cfg.frequency.precompute_train is True
     assert cfg.frequency.precompute_batch_size == 64
+    assert cfg.frequency.encoder_variant == "band_fusion_v1"
+    assert cfg.frequency.band_encoders.low_kernel_sizes == [3, 5]
+    assert cfg.frequency.band_encoders.high_directional_lengths == [3, 5, 7]
+    assert cfg.frequency.band_encoders.fusion_heads == 4
 
 
 def test_training_hour_limit_is_optional_and_uses_elapsed_wall_time():
@@ -37,7 +36,7 @@ def test_kaggle_notebook_exposes_runtime_and_frequency_cache_controls():
         (ROOT / "kaggle" / "higan_frequency.ipynb").read_text(encoding="utf-8"))
     source = "\n".join(
         "".join(cell.get("source", [])) for cell in notebook["cells"])
-    for name in ("GENERATOR_VARIANT", "MAX_HOURS", "PRECOMPUTE_FREQUENCY", "PRECOMPUTE_BATCH_SIZE",
+    for name in ("MAX_HOURS", "PRECOMPUTE_FREQUENCY", "PRECOMPUTE_BATCH_SIZE",
                  "PREVIEW_EVERY_STEPS", "PREVIEW_ITEMS"):
         assert name in source
     assert "'restore', '--', 'configs/config.yaml'" in source

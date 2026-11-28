@@ -4,7 +4,13 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from higan_frequency.band_encoders import (BandFeatureFusion,
+                                           HighFrequencyDirectionalEncoder,
+                                           LowFrequencyGlyphEncoder)
 from networks.module import StyleEncoder
+
+
+FREQUENCY_ENCODER_VARIANT = "band_fusion_v1"
 
 
 def _pad_right(image: torch.Tensor, width: int, mode: str) -> torch.Tensor:
@@ -68,19 +74,46 @@ def split_frequency_bands(images: torch.Tensor, image_lens: torch.Tensor,
 
 
 class FrequencyStyleEncoder(nn.Module):
-    """One shared 32-D HiGAN StyleEncoder applied low/original/high in order."""
+    """Band-specific low/pixel/high encoders with a HiGAN pixel-style anchor."""
 
-    def __init__(self, cutoff: float = 0.06, padding_mode: str = "reflect", **encoder_kwargs):
+    def __init__(self, cutoff: float = 0.06, padding_mode: str = "reflect",
+                 band_config=None, **encoder_kwargs):
         super().__init__()
         if int(encoder_kwargs.get("style_dim", 32)) != 32:
             raise ValueError("FrequencyStyleEncoder requires EncModel.style_dim=32")
         self.cutoff = float(cutoff)
         self.padding_mode = str(padding_mode)
-        self.encoder = StyleEncoder(**encoder_kwargs)
+        self.pixel_encoder = StyleEncoder(**encoder_kwargs)
+        settings = dict(band_config or {})
+        common = {
+            "style_dim": 32,
+            "base_channels": int(settings.get("base_channels", 32)),
+            "max_channels": int(settings.get("max_channels", 128)),
+            "norm_groups": int(settings.get("norm_groups", 8)),
+            "init": str(settings.get("init", "N02")),
+        }
+        self.low_encoder = LowFrequencyGlyphEncoder(
+            kernel_sizes=tuple(settings.get("low_kernel_sizes", (3, 5))),
+            dilation=int(settings.get("low_dilation", 2)), **common)
+        self.high_encoder = HighFrequencyDirectionalEncoder(
+            directional_lengths=tuple(
+                settings.get("high_directional_lengths", (3, 5, 7))), **common)
+        self.fusion = BandFeatureFusion(
+            style_dim=32,
+            num_heads=int(settings.get("fusion_heads", 4)),
+            hidden_dim=int(settings.get("fusion_hidden_dim", 192)),
+            dropout=float(settings.get("fusion_dropout", 0.0)),
+        )
 
     @property
     def style_dim(self) -> int:
-        return self.encoder.style_dim * 3
+        return self.pixel_encoder.style_dim * 3
+
+    def encode_pixel(self, images: torch.Tensor, image_lens: torch.Tensor,
+                     wid_cnn_backbone=None, vae_mode: bool = False):
+        """Run the unchanged HiGAN StyleEncoder on the original pixel image."""
+        return self.pixel_encoder(
+            images.float(), image_lens, wid_cnn_backbone, vae_mode=vae_mode)
 
     def forward(self, images: torch.Tensor, image_lens: torch.Tensor,
                 wid_cnn_backbone=None, vae_mode: bool = False,
@@ -92,14 +125,13 @@ class FrequencyStyleEncoder(nn.Module):
             low, high = frequency_bands
             if low.shape != images.shape or high.shape != images.shape:
                 raise ValueError("precomputed frequency bands must match images")
-        ordered = (low, images.float(), high)
+        low_style = self.low_encoder(low, image_lens)
+        high_style = self.high_encoder(high, image_lens)
         if not vae_mode:
-            return torch.cat([
-                self.encoder(band, image_lens, wid_cnn_backbone, vae_mode=False)
-                for band in ordered
-            ], dim=1)
-        encoded = [
-            self.encoder(band, image_lens, wid_cnn_backbone, vae_mode=True)
-            for band in ordered
-        ]
-        return tuple(torch.cat([item[index] for item in encoded], dim=1) for index in range(3))
+            pixel_style = self.encode_pixel(
+                images, image_lens, wid_cnn_backbone, vae_mode=False)
+            return self.fusion(low_style, pixel_style, high_style)
+        pixel_z, pixel_mu, pixel_logvar = self.encode_pixel(
+            images, image_lens, wid_cnn_backbone, vae_mode=True)
+        fused_style = self.fusion(low_style, pixel_z, high_style)
+        return fused_style, pixel_mu, pixel_logvar
